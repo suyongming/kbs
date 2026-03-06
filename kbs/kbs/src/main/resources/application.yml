@@ -1,0 +1,23 @@
+logging:
+  level:
+    org.suym.ai.kbs: DEBUG
+    dev.langchain4j: DEBUG
+
+spring:
+  application:
+    name: kbs
+
+server:
+  port: 10483
+
+milvus:
+  host: localhost
+  port: 19530
+  collection-name: enterprise_knowledge_v2
+  dimension: 384
+
+llm:
+  openai:
+    base-url: https://dashscope.aliyuncs.com/compatible-mode/v1 # 阿里云百炼兼容模式 endpoint
+    api-key: sk-be4abd8c25ad40c5b495b29795ac2144
+    model-name: qwen-plus

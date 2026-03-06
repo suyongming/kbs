@@ -1,0 +1,28 @@
+logging:
+  level:
+    org.suym.ai.kbs: DEBUG
+    dev.langchain4j: DEBUG
+
+spring:
+  application:
+    name: kbs
+
+server:
+  port: 10483
+
+milvus:
+  host: localhost
+  port: 19530
+  collection-name: enterprise_knowledge_v2
+  dimension: 384
+
+llm:
+  # 本地部署参考 攻略.md  ,  本地部署ollama
+  openai:
+    # ollama 兼容 OpenAI 格式的 API 地址
+    base-url: http://localhost:11434/v1
+    # ollama 不需要 Key，随便填一个
+    api-key: ollama
+    # 必须与 ollama pull 的模型名字一致
+    model-name: deepseek-r1:8b
+
