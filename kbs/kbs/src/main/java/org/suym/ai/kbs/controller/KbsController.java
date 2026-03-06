@@ -155,9 +155,15 @@ public class KbsController {
                 .map(TextSegment::text)
                 .collect(Collectors.joining("\n\n"));
 
+        // 可能会有幻觉
         String prompt = "基于以下上下文回答问题:\n\n" +
                 "上下文:\n" + context + "\n\n" +
                 "问题: " + question;
+
+        // 完全降低幻觉
+//        String prompt = "基于以下上下文回答问题,如果你在上下文中找不到答案，请直接回答‘知识库中未找到相关信息’，不要编造答案。:\n\n" +
+//                "上下文:\n" + context + "\n\n" +
+//                "问题: " + question;
 
         log.info("Prompt built. Length: {}", prompt.length());
 
