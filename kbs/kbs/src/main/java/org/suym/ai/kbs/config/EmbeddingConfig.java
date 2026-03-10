@@ -48,17 +48,20 @@ public class EmbeddingConfig {
     @Value("${milvus.dimension}")
     private int dimension;
 
+    @Value("${milvus.goods.collection-name}")
+    private String goodsCollectionName;
+
+    @Value("${milvus.goods.dimension}")
+    private int goodsDimension;
+
     @Value("${clip.text_model.path:}")
     private String clipTextModelPath;
 
-    @Value("${clip.text_tokenizer.path:}")
+    @Value("${clip.text_model.tokenizer_path:}")
     private String clipTextTokenizerPath;
 
     @Value("${clip.vision_model.path:}")
     private String clipVisionModelPath;
-
-    @Value("${clip.vision_tokenizer.path:}")
-    private String clipVisionTokenizerPath;
 
     /**
      * 配置文本 Embedding 模型 Bean
@@ -82,7 +85,7 @@ public class EmbeddingConfig {
         }
         return new ClipEmbeddingModel(
             clipTextModelPath, clipTextTokenizerPath,
-            clipVisionModelPath, clipVisionTokenizerPath
+            clipVisionModelPath
         );
     }
 
@@ -128,6 +131,26 @@ public class EmbeddingConfig {
                 .uri("http://" + host + ":" + port)
                 .collectionName(collectionName)
                 .dimension(dimension)
+                .retrieveEmbeddingsOnSearch(true)
+                .build();
+    }
+
+    /**
+     * 配置 Milvus Embedding Store Bean (商品知识库)
+     */
+    @Bean
+    public EmbeddingStore<TextSegment> goodsEmbeddingStore() {
+        String vectorFieldName = "vector";
+        String idFieldName = "id";
+        String textFieldName = "text";
+        String metadataFieldName = "metadata";
+
+        setupMilvus(host, port, goodsCollectionName, goodsDimension, idFieldName, vectorFieldName, textFieldName, metadataFieldName);
+
+        return MilvusEmbeddingStore.builder()
+                .uri("http://" + host + ":" + port)
+                .collectionName(goodsCollectionName)
+                .dimension(goodsDimension)
                 .retrieveEmbeddingsOnSearch(true)
                 .build();
     }

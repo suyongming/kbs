@@ -15,9 +15,20 @@ milvus:
   port: 19530
   collection-name: enterprise_knowledge_v2
   dimension: 384
+  goods:
+    collection-name: goods_store_v1
+    dimension: 512
 
 llm:
   openai:
     base-url: https://dashscope.aliyuncs.com/compatible-mode/v1 # 阿里云百炼兼容模式 endpoint
     api-key: sk-be4abd8c25ad40c5b495b29795ac2144
     model-name: qwen-plus
+
+
+clip:
+  text_model:
+    path: "C:/Users/18699/Desktop/AI/计算机视觉/cilp模型/text_model.onnx"
+    tokenizer_path: "C:/Users/18699/Desktop/AI/计算机视觉/cilp模型/tokenizer.json"
+  vision_model:
+    path: "C:/Users/18699/Desktop/AI/计算机视觉/cilp模型/vision_model.onnx"
