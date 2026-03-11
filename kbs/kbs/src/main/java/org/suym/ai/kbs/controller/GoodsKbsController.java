@@ -16,7 +16,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 import org.suym.ai.kbs.dto.GoodsSaveDTO;
 import org.suym.ai.kbs.dto.GoodsUpdateDTO;
 import org.suym.ai.kbs.dto.base.JsonResult;
@@ -25,6 +27,10 @@ import org.suym.ai.kbs.vo.GoodsSearchVO;
 import org.suym.ai.kbs.vo.PageVO;
 import org.suym.ai.kbs.vo.TrainResultVO;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -52,6 +58,73 @@ public class GoodsKbsController {
         this.clipEmbeddingModel = clipEmbeddingModel;
     }
 
+    /**
+     * 6. 以图搜商品 (Image to Goods Search)
+     * API: POST /api/goods/search-by-image
+     */
+    @Operation(summary = "以图搜商品", description = "上传图片，在商品库中搜索最相似的商品")
+    @PostMapping(value = "/search-by-image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public JsonResult<List<GoodsSearchVO>> searchGoodsByImage(
+            @Parameter(description = "用于搜索的图片", required = true)
+            @RequestParam("file") MultipartFile file,
+            @Parameter(description = "返回结果数量", required = false)
+            @RequestParam(value = "limit", defaultValue = "5") int limit
+    ) throws IOException {
+        if (clipEmbeddingModel == null) {
+            throw new IllegalStateException("CLIP model is not initialized.");
+        }
+        if (file.isEmpty()) {
+            throw new IllegalArgumentException("File is empty");
+        }
+
+        // 1. 保存查询图片到临时文件
+        Path tempDir = Paths.get(System.getProperty("java.io.tmpdir"), "kbs_goods_search_images");
+        if (!Files.exists(tempDir)) {
+            Files.createDirectories(tempDir);
+        }
+        Path tempFilePath = tempDir.resolve(UUID.randomUUID().toString() + "_" + file.getOriginalFilename());
+
+        try {
+            file.transferTo(tempFilePath.toFile());
+            log.info("Temporary search image saved to: {}", tempFilePath);
+
+            // 2. 计算查询图片的向量
+            Image queryImage = Image.builder().url(tempFilePath.toUri().toString()).build();
+            log.info("Calculating CLIP embedding for image...");
+            Embedding queryEmbedding = clipEmbeddingModel.embed(queryImage).content();
+
+            // 3. 在商品库中检索
+            log.info("Searching in Milvus goods store...");
+            EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
+                    .queryEmbedding(queryEmbedding)
+                    .maxResults(limit)
+                    .minScore(0.0)
+                    .build();
+
+            EmbeddingSearchResult<TextSegment> result = goodsEmbeddingStore.search(searchRequest);
+            log.info("Search finished. Found {} matches.", result.matches().size());
+
+            // 4. 格式化返回结果
+            List<GoodsSearchVO> resultList = result.matches().stream()
+                    .map(match -> GoodsSearchVO.builder()
+                            .score(match.score())
+                            .text(match.embedded().text())
+                            .metadata(new HashMap<>(match.embedded().metadata().asMap()))
+                            .build())
+                    .collect(Collectors.toList());
+
+            return JsonResult.ok(resultList);
+
+        } finally {
+            // 5. 清理临时文件
+            try {
+                Files.deleteIfExists(tempFilePath);
+                log.debug("Temporary search image deleted: {}", tempFilePath);
+            } catch (IOException e) {
+                log.warn("Failed to delete temporary search image: {}", tempFilePath, e);
+            }
+        }
+    }
     /**
      * 4. 查询所有商品 (分页)
      */
