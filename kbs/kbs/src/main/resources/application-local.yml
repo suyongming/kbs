@@ -4,17 +4,23 @@ logging:
     dev.langchain4j: DEBUG
 
 spring:
+  evn: local
   application:
     name: kbs
 
 server:
   port: 10483
 
+
 milvus:
   host: localhost
   port: 19530
-  collection-name: enterprise_knowledge_v2
-  dimension: 384
+  default:
+    collection-name: enterprise_knowledge_v2
+    dimension: 384
+  goods:
+    collection-name: goods_store_v1
+    dimension: 512
 
 llm:
   # 本地部署参考 攻略.md  ,  本地部署ollama
@@ -26,3 +32,9 @@ llm:
     # 必须与 ollama pull 的模型名字一致
     model-name: deepseek-r1:8b
 
+clip:
+  text_model:
+    path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/text_model.onnx"
+    tokenizer_path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/tokenizer.json"
+  vision_model:
+    path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/vision_model.onnx"

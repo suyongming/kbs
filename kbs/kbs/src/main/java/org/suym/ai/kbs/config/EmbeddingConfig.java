@@ -2,9 +2,6 @@ package org.suym.ai.kbs.config;
 
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.suym.ai.kbs.model.embedding.ClipEmbeddingModel;
 import dev.langchain4j.model.embedding.onnx.allminilml6v2.AllMiniLmL6V2EmbeddingModel;
 import dev.langchain4j.store.embedding.EmbeddingStore;
 import dev.langchain4j.store.embedding.milvus.MilvusEmbeddingStore;
@@ -17,54 +14,65 @@ import io.milvus.param.collection.CreateCollectionParam;
 import io.milvus.param.collection.FieldType;
 import io.milvus.param.collection.HasCollectionParam;
 import io.milvus.param.index.CreateIndexParam;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-
 import org.springframework.context.annotation.Primary;
+import org.suym.ai.kbs.model.embedding.ClipEmbeddingModel;
 
 /**
- * Embedding 配置类
+ * Embedding & Vector Store Configuration
  * 负责配置 Embedding 模型和 Milvus 向量数据库连接
+ * 支持多集合配置 (Default / Goods)
  */
 @Configuration
 public class EmbeddingConfig {
 
     private static final Logger log = LoggerFactory.getLogger(EmbeddingConfig.class);
 
-    // 从配置文件中读取 Milvus 的主机地址
+    // --- Milvus Common Config ---
     @Value("${milvus.host}")
-    private String host;
+    private String milvusHost;
 
-    // 从配置文件中读取 Milvus 的端口号
     @Value("${milvus.port}")
-    private int port;
+    private int milvusPort;
 
-    // 从配置文件中读取 Milvus 的集合名称
-    @Value("${milvus.collection-name}")
-    private String collectionName;
+    // --- Default Collection Config (Text Knowledge) ---
+    @Value("${milvus.default.collection-name}")
+    private String defaultCollectionName;
 
-    // 从配置文件中读取 Embedding 向量的维度 (AllMiniLmL6V2 为 384)
-    @Value("${milvus.dimension}")
-    private int dimension;
+    @Value("${milvus.default.dimension}")
+    private int defaultDimension;
 
+    // --- Goods Collection Config (Image/Multimodal Knowledge) ---
     @Value("${milvus.goods.collection-name}")
     private String goodsCollectionName;
 
     @Value("${milvus.goods.dimension}")
     private int goodsDimension;
 
-    @Value("${clip.text_model.path:}")
+    // --- Gallery Collection Config (Pure Image Search Demo) ---
+    @Value("${milvus.gallery.collection-name}")
+    private String galleryCollectionName;
+
+    @Value("${milvus.gallery.dimension}")
+    private int galleryDimension;
+
+    // --- CLIP Model Config ---
+    @Value("${clip.model.text-path:}")
     private String clipTextModelPath;
 
-    @Value("${clip.text_model.tokenizer_path:}")
-    private String clipTextTokenizerPath;
+    @Value("${clip.model.tokenizer-path:}")
+    private String clipTokenizerPath;
 
-    @Value("${clip.vision_model.path:}")
+    @Value("${clip.model.vision-path:}")
     private String clipVisionModelPath;
 
     /**
-     * 配置文本 Embedding 模型 Bean
+     * 1. 默认文本 Embedding 模型 (AllMiniLmL6V2)
+     * 用于处理纯文本知识库 (RAG)
      */
     @Bean
     @Primary
@@ -73,82 +81,45 @@ public class EmbeddingConfig {
     }
 
     /**
-     * 配置多模态 (CLIP) Embedding 模型 Bean
-     * 使用自定义的 ClipEmbeddingModel 包装类
+     * 2. 多模态 CLIP Embedding 模型
+     * 用于商品图片/文本检索
      */
     @Bean
     public ClipEmbeddingModel clipEmbeddingModel() {
         if (clipTextModelPath == null || clipTextModelPath.isEmpty()) {
-            // 如果未配置，返回 null 或抛出异常，建议用户下载模型
             log.warn("CLIP models not configured. Image search will be disabled.");
             return null;
         }
-        return new ClipEmbeddingModel(
-            clipTextModelPath, clipTextTokenizerPath,
-            clipVisionModelPath
-        );
+        return new ClipEmbeddingModel(clipTextModelPath, clipTokenizerPath, clipVisionModelPath);
     }
 
     /**
-     * 配置 Milvus Embedding Store Bean (文本知识库)
+     * 3. 默认 Milvus Embedding Store (文本知识库)
+     * 对应 enterprise_knowledge_v2
      */
     @Bean
     @Primary
     public EmbeddingStore<TextSegment> milvusEmbeddingStore() {
-        // ... (保持原有文本 Store 逻辑)
-        String vectorFieldName = getFieldValue("VECTOR_FIELD_NAME", "vector");
-        String idFieldName = getFieldValue("ID_FIELD_NAME", "id");
-        String textFieldName = getFieldValue("TEXT_FIELD_NAME", "text");
-        String metadataFieldName = getFieldValue("METADATA_FIELD_NAME", "metadata");
-
-        setupMilvus(host, port, collectionName, dimension, idFieldName, vectorFieldName, textFieldName, metadataFieldName);
+        ensureMilvusCollection(defaultCollectionName, defaultDimension);
         
         return MilvusEmbeddingStore.builder()
-                .uri("http://" + host + ":" + port)
-                .collectionName(collectionName)
-                .dimension(dimension)
+                .uri("http://" + milvusHost + ":" + milvusPort)
+                .collectionName(defaultCollectionName)
+                .dimension(defaultDimension)
                 .retrieveEmbeddingsOnSearch(true)
                 .build();
     }
 
     /**
-     * 配置 Milvus Embedding Store Bean (图片知识库)
-     * 使用不同的集合名称和维度 (512)
-     */
-    @Bean
-    public EmbeddingStore<TextSegment> imageEmbeddingStore() {
-        String collectionName = "image_gallery_v1";
-        int dimension = 512; // CLIP ViT-B/32 维度
-        
-        String vectorFieldName = "vector";
-        String idFieldName = "id";
-        String textFieldName = "text"; // 这里存图片描述或路径
-        String metadataFieldName = "metadata";
-
-        setupMilvus(host, port, collectionName, dimension, idFieldName, vectorFieldName, textFieldName, metadataFieldName);
-
-        return MilvusEmbeddingStore.builder()
-                .uri("http://" + host + ":" + port)
-                .collectionName(collectionName)
-                .dimension(dimension)
-                .retrieveEmbeddingsOnSearch(true)
-                .build();
-    }
-
-    /**
-     * 配置 Milvus Embedding Store Bean (商品知识库)
+     * 4. 商品 Milvus Embedding Store (商品知识库)
+     * 对应 goods_store_v1
      */
     @Bean
     public EmbeddingStore<TextSegment> goodsEmbeddingStore() {
-        String vectorFieldName = "vector";
-        String idFieldName = "id";
-        String textFieldName = "text";
-        String metadataFieldName = "metadata";
-
-        setupMilvus(host, port, goodsCollectionName, goodsDimension, idFieldName, vectorFieldName, textFieldName, metadataFieldName);
+        ensureMilvusCollection(goodsCollectionName, goodsDimension);
 
         return MilvusEmbeddingStore.builder()
-                .uri("http://" + host + ":" + port)
+                .uri("http://" + milvusHost + ":" + milvusPort)
                 .collectionName(goodsCollectionName)
                 .dimension(goodsDimension)
                 .retrieveEmbeddingsOnSearch(true)
@@ -156,69 +127,66 @@ public class EmbeddingConfig {
     }
 
     /**
-     * 辅助方法：通过反射获取类的静态字段值
+     * 5. 图库 Milvus Embedding Store (通用图片库)
+     * 对应 image_gallery_v1
      */
-    private String getFieldValue(String fieldName, String defaultValue) {
-        try {
-            java.lang.reflect.Field field = MilvusEmbeddingStore.class.getDeclaredField(fieldName);
-            field.setAccessible(true);
-            return (String) field.get(null);
-        } catch (Exception e) {
-            return defaultValue;
-        }
+    @Bean
+    public EmbeddingStore<TextSegment> galleryEmbeddingStore() {
+        ensureMilvusCollection(galleryCollectionName, galleryDimension);
+
+        return MilvusEmbeddingStore.builder()
+                .uri("http://" + milvusHost + ":" + milvusPort)
+                .collectionName(galleryCollectionName)
+                .dimension(galleryDimension)
+                .retrieveEmbeddingsOnSearch(true)
+                .build();
     }
 
     /**
-     * 初始化 Milvus 集合和索引
-     * 如果集合不存在，则创建集合；如果索引不存在，则创建索引
+     * 辅助方法：确保 Milvus 集合和索引存在
      */
-    private void setupMilvus(String host, int port, String collectionName, int dimension, 
-                             String idFieldName, String vectorFieldName, String textFieldName, String metadataFieldName) {
-        // 创建 Milvus 客户端
+    private void ensureMilvusCollection(String collectionName, int dimension) {
         MilvusServiceClient client = new MilvusServiceClient(
                 ConnectParam.newBuilder()
-                        .withHost(host)
-                        .withPort(port)
+                        .withHost(milvusHost)
+                        .withPort(milvusPort)
                         .build()
         );
 
         try {
-            // 检查集合是否存在
             boolean hasCollection = client.hasCollection(HasCollectionParam.newBuilder()
                     .withCollectionName(collectionName)
                     .build()).getData();
 
             if (!hasCollection) {
-                // 定义 ID 字段：字符串类型，最大长度 36，主键，非自动生成 (由 LangChain4j 生成 UUID)
+                log.info("Creating Milvus collection: {}", collectionName);
+                
+                // Define Fields
                 FieldType id = FieldType.newBuilder()
-                        .withName(idFieldName)
+                        .withName("id")
                         .withDataType(DataType.VarChar)
                         .withMaxLength(36)
                         .withPrimaryKey(true)
-                        .withAutoID(false) 
+                        .withAutoID(false)
                         .build();
 
-                // 定义向量字段：浮点向量类型，指定维度
                 FieldType embedding = FieldType.newBuilder()
-                        .withName(vectorFieldName)
+                        .withName("vector")
                         .withDataType(DataType.FloatVector)
                         .withDimension(dimension)
                         .build();
 
-                // 定义文本字段：字符串类型，用于存储原始文本内容
                 FieldType text = FieldType.newBuilder()
-                        .withName(textFieldName)
+                        .withName("text")
                         .withDataType(DataType.VarChar)
                         .withMaxLength(65535)
                         .build();
-                
-                // 定义元数据字段：JSON 类型，用于存储额外的元数据
+
                 FieldType metadata = FieldType.newBuilder()
-                        .withName(metadataFieldName)
-                        .withDataType(DataType.JSON) 
+                        .withName("metadata")
+                        .withDataType(DataType.JSON)
                         .build();
 
-                // 创建集合参数
                 CreateCollectionParam createParam = CreateCollectionParam.newBuilder()
                         .withCollectionName(collectionName)
                         .addFieldType(id)
@@ -227,34 +195,26 @@ public class EmbeddingConfig {
                         .addFieldType(metadata)
                         .build();
 
-                // 执行创建集合操作
                 client.createCollection(createParam);
-                System.out.println("Collection " + collectionName + " created.");
-            } else {
-                 System.out.println("Collection " + collectionName + " exists.");
-            }
-
-            // 创建索引 (如果需要)
-            try {
-                // 定义索引参数：使用 IVF_FLAT 索引类型，COSINE (余弦相似度) 度量类型
+                
+                // Create Index
                 CreateIndexParam indexParam = CreateIndexParam.newBuilder()
                         .withCollectionName(collectionName)
-                        .withFieldName(vectorFieldName)
+                        .withFieldName("vector")
                         .withIndexType(IndexType.IVF_FLAT)
                         .withMetricType(MetricType.COSINE)
                         .withExtraParam("{\"nlist\":1024}")
                         .build();
 
                 client.createIndex(indexParam);
-                System.out.println("Index created/ensured on " + collectionName);
-            } catch (Exception e) {
-                System.out.println("Index creation might have failed or already exists: " + e.getMessage());
+                log.info("Collection {} and index created successfully.", collectionName);
+            } else {
+                log.info("Collection {} already exists.", collectionName);
             }
-
         } catch (Exception e) {
-            throw new RuntimeException("Failed to setup Milvus collection", e);
+            log.error("Failed to ensure Milvus collection: {}", collectionName, e);
+            throw new RuntimeException("Milvus setup failed", e);
         } finally {
-            // 关闭客户端连接
             client.close();
         }
     }

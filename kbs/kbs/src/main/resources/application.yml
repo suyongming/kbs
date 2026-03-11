@@ -4,19 +4,26 @@ logging:
     dev.langchain4j: DEBUG
 
 spring:
+  evn: dev
   application:
     name: kbs
-
 server:
   port: 10483
 
 milvus:
   host: localhost
   port: 19530
-  collection-name: enterprise_knowledge_v2
-  dimension: 384
+  # 默认
+  default:
+    collection-name: enterprise_knowledge_v2
+    dimension: 384
+  # 商品
   goods:
     collection-name: goods_store_v1
+    dimension: 512
+  # 画廊
+  gallery:
+    collection-name: image_gallery_v1
     dimension: 512
 
 llm:
@@ -27,8 +34,7 @@ llm:
 
 
 clip:
-  text_model:
-    path: "C:/Users/18699/Desktop/AI/计算机视觉/cilp模型/text_model.onnx"
-    tokenizer_path: "C:/Users/18699/Desktop/AI/计算机视觉/cilp模型/tokenizer.json"
-  vision_model:
-    path: "C:/Users/18699/Desktop/AI/计算机视觉/cilp模型/vision_model.onnx"
+  model:
+    text-path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/text_model.onnx"
+    tokenizer-path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/tokenizer.json"
+    vision-path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/vision_model.onnx"
