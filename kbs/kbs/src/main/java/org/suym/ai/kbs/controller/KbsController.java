@@ -25,6 +25,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.suym.ai.kbs.dto.base.JsonResult;
+import org.suym.ai.kbs.vo.ChatResultVO;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -63,12 +65,12 @@ public class KbsController {
      */
     @Operation(summary = "上传文档", description = "上传文本文件 (.txt)，系统自动进行分段、向量化并存入 Milvus 知识库")
     @PostMapping(value = "/documents/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public String uploadDocument(
+    public JsonResult<String> uploadDocument(
             @Parameter(description = "需要上传的文本文件", required = true) 
             @RequestParam("file") MultipartFile file
     ) throws IOException {
         if (file.isEmpty()) {
-            return "File is empty";
+            return JsonResult.fail("File is empty");
         }
 
         // 1. 读取文件内容 (MVP 仅支持文本文件)
@@ -86,7 +88,7 @@ public class KbsController {
         List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
         embeddingStore.addAll(embeddings, segments);
 
-        return "Successfully uploaded " + filename + ". Created " + segments.size() + " segments.";
+        return JsonResult.ok("Successfully uploaded " + filename + ". Created " + segments.size() + " segments.");
     }
 
     /**
@@ -98,7 +100,7 @@ public class KbsController {
     @ApiResponse(responseCode = "200", description = "成功返回回答", 
             content = @Content(schema = @Schema(example = "{\"answer\": \"...\", \"source_docs\": [\"file1.txt\"]}")))
     @PostMapping("/chat")
-    public Map<String, Object> chat(
+    public JsonResult<ChatResultVO> chat(
             @Parameter(description = "包含问题的 JSON 对象，例如 {\"question\": \"...\"}", required = true)
             @RequestBody Map<String, String> request) {
 
@@ -154,10 +156,12 @@ public class KbsController {
                     .distinct()
                     .collect(Collectors.toList());
 
-            return Map.of(
-                    "answer", answer.text(),
-                    "source_docs", sourceDocs
-            );
+            ChatResultVO resultVO = ChatResultVO.builder()
+                    .answer(answer.text())
+                    .sourceDocs(sourceDocs)
+                    .build();
+
+            return JsonResult.ok(resultVO);
         } catch (Exception e) {
             log.error("LLM call failed: {}", e.getMessage(), e);
             throw e;
@@ -171,7 +175,7 @@ public class KbsController {
      */
     @Operation(summary = "删除文档/数据", description = "根据 ID 删除知识库中的数据")
     @DeleteMapping("/documents/{id}")
-    public String deleteDocument(
+    public JsonResult<String> deleteDocument(
             @Parameter(description = "需要删除的数据 ID", required = true)
             @PathVariable("id") String id
     ) {
@@ -187,8 +191,9 @@ public class KbsController {
             log.info("Deleted from text embedding store: {}", id);
         } catch (Exception e) {
             log.warn("Failed to delete from text embedding store: {}", e.getMessage());
+            return JsonResult.fail("Failed to delete: " + e.getMessage());
         }
 
-        return "Delete operation executed for ID: " + id;
+        return JsonResult.ok("Delete operation executed for ID: " + id);
     }
 }

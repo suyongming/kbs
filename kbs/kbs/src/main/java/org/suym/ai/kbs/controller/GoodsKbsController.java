@@ -1,7 +1,5 @@
 package org.suym.ai.kbs.controller;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.image.Image;
@@ -13,18 +11,20 @@ import dev.langchain4j.store.embedding.EmbeddingStore;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import net.minidev.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.multipart.MultipartFile;
 import org.suym.ai.kbs.dto.GoodsSaveDTO;
 import org.suym.ai.kbs.dto.GoodsUpdateDTO;
+import org.suym.ai.kbs.dto.base.JsonResult;
 import org.suym.ai.kbs.model.embedding.ClipEmbeddingModel;
+import org.suym.ai.kbs.vo.GoodsSearchVO;
+import org.suym.ai.kbs.vo.PageVO;
+import org.suym.ai.kbs.vo.TrainResultVO;
 
-import java.io.IOException;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -45,13 +45,11 @@ public class GoodsKbsController {
 
     private final EmbeddingStore<TextSegment> goodsEmbeddingStore;
     private final ClipEmbeddingModel clipEmbeddingModel;
-    private final ObjectMapper objectMapper;
 
     public GoodsKbsController(@Qualifier("goodsEmbeddingStore") EmbeddingStore<TextSegment> goodsEmbeddingStore,
                               @Autowired(required = false) ClipEmbeddingModel clipEmbeddingModel) {
         this.goodsEmbeddingStore = goodsEmbeddingStore;
         this.clipEmbeddingModel = clipEmbeddingModel;
-        this.objectMapper = new ObjectMapper();
     }
 
     /**
@@ -59,7 +57,7 @@ public class GoodsKbsController {
      */
     @Operation(summary = "查询商品列表", description = "分页查询所有商品")
     @GetMapping("/list")
-    public Map<String, Object> listGoods(
+    public JsonResult<PageVO<GoodsSearchVO>> listGoods(
             @Parameter(description = "页码 (从1开始)", example = "1")
             @RequestParam(value = "page", defaultValue = "1") int page,
             @Parameter(description = "每页数量", example = "10")
@@ -85,29 +83,29 @@ public class GoodsKbsController {
 
         // 手动分页截取
         int start = (page - 1) * size;
-        List<Map<String, Object>> records = new ArrayList<>();
+        List<GoodsSearchVO> records = new ArrayList<>();
 
         if (start < allMatches.size()) {
             int end = Math.min(start + size, allMatches.size());
             List<EmbeddingMatch<TextSegment>> pageMatches = allMatches.subList(start, end);
 
             records = pageMatches.stream()
-                    .map(match -> {
-                        Map<String, Object> item = new HashMap<>();
-                        item.put("text", match.embedded().text());
-                        item.put("metadata", match.embedded().metadata().asMap());
-                        return item;
-                    })
+                    .map(match -> GoodsSearchVO.builder()
+                            .score(match.score())
+                            .text(match.embedded().text())
+                            .metadata(new HashMap<>(match.embedded().metadata().asMap()))
+                            .build())
                     .collect(Collectors.toList());
         }
 
-        Map<String, Object> response = new HashMap<>();
-        response.put("total_scanned", allMatches.size()); // 注意：这不是真实的总数，受限于 topK
-        response.put("page", page);
-        response.put("size", size);
-        response.put("records", records);
+        PageVO<GoodsSearchVO> pageVO = PageVO.<GoodsSearchVO>builder()
+                .total(allMatches.size())
+                .page(page)
+                .size(size)
+                .records(records)
+                .build();
 
-        return response;
+        return JsonResult.ok(pageVO);
     }
 
     /**
@@ -116,7 +114,7 @@ public class GoodsKbsController {
      */
     @Operation(summary = "编辑商品", description = "更新商品信息 (先删除旧的，再插入新的)")
     @PutMapping("/update")
-    public Map<String, Object> updateGoods(
+    public JsonResult<String> updateGoods(
             @RequestBody GoodsUpdateDTO dto
     ) {
         if (dto.getSku() == null || dto.getSku().isEmpty()) {
@@ -124,7 +122,6 @@ public class GoodsKbsController {
         }
 
         log.info("Updating goods: {}", dto.getSku());
-        Map<String, Object> result = new HashMap<>();
 
         try {
             // 1. 删除旧数据
@@ -157,15 +154,12 @@ public class GoodsKbsController {
             // 3. 插入新数据
             goodsEmbeddingStore.add(imageEmbedding, segment);
 
-            result.put("success", true);
-            result.put("message", "Goods updated successfully: " + dto.getSku());
+            return JsonResult.ok("Goods updated successfully: " + dto.getSku());
 
         } catch (Exception e) {
             log.error("Failed to update goods: {}", dto.getSku(), e);
-            result.put("success", false);
-            result.put("message", "Failed to update: " + e.getMessage());
+            return JsonResult.fail("Failed to update: " + e.getMessage());
         }
-        return result;
     }
 
 
@@ -177,7 +171,7 @@ public class GoodsKbsController {
      */
     @Operation(summary = "训练商品数据", description = "批量上传商品信息 (JSON 数组)，系统将图片向量化并存入知识库")
     @PostMapping(value = "/train")
-    public Map<String, Object> trainGoodsData(
+    public JsonResult<TrainResultVO> trainGoodsData(
             @RequestBody List<GoodsSaveDTO> goodsList
     ) {
         if (clipEmbeddingModel == null) {
@@ -243,14 +237,15 @@ public class GoodsKbsController {
             }
         }
 
-        Map<String, Object> result = new HashMap<>();
-        result.put("total_items", totalProcessed);
-        result.put("success_count", successSkus.size());
-        result.put("success_skus", successSkus);
-        result.put("failed_count", failedLines.size());
-        result.put("failed_lines", failedLines);
+        TrainResultVO resultVO = TrainResultVO.builder()
+                .totalItems(totalProcessed)
+                .successCount(successSkus.size())
+                .successSkus(successSkus)
+                .failedCount(failedLines.size())
+                .failedLines(failedLines)
+                .build();
 
-        return result;
+        return JsonResult.ok(resultVO);
     }
 
     /**
@@ -259,7 +254,7 @@ public class GoodsKbsController {
      */
     @Operation(summary = "自然语言搜商品", description = "输入文字描述（如'红色连衣裙'），搜索最匹配的商品")
     @GetMapping("/search")
-    public List<Map<String, Object>> searchGoods(
+    public JsonResult<List<GoodsSearchVO>> searchGoods(
             @Parameter(description = "搜索关键词", required = true)
             @RequestParam("query") String query,
             @Parameter(description = "返回结果数量", required = false)
@@ -287,15 +282,15 @@ public class GoodsKbsController {
         EmbeddingSearchResult<TextSegment> result = goodsEmbeddingStore.search(searchRequest);
 
         // 3. 格式化返回结果
-        return result.matches().stream()
-                .map(match -> {
-                    Map<String, Object> item = new HashMap<>();
-                    item.put("score", match.score());
-                    item.put("text", match.embedded().text());
-                    item.put("metadata", match.embedded().metadata().asMap());
-                    return item;
-                })
+        List<GoodsSearchVO> resultList = result.matches().stream()
+                .map(match -> GoodsSearchVO.builder()
+                        .score(match.score())
+                        .text(match.embedded().text())
+                        .metadata(new HashMap<>(match.embedded().metadata().asMap()))
+                        .build())
                 .collect(Collectors.toList());
+
+        return JsonResult.ok(resultList);
     }
 
     /**
@@ -304,7 +299,7 @@ public class GoodsKbsController {
      */
     @Operation(summary = "删除商品", description = "删除商品向量。请提供 sku 或 id 其中之一。")
     @DeleteMapping("/delete")
-    public Map<String, Object> deleteGoods(
+    public JsonResult<String> deleteGoods(
             @Parameter(description = "商品 SKU (Metadata)") 
             @RequestParam(required = false) String sku,
             @Parameter(description = "向量 ID (Primary Key)") 
@@ -314,25 +309,21 @@ public class GoodsKbsController {
             throw new IllegalArgumentException("Either 'sku' or 'id' must be provided");
         }
 
-        Map<String, Object> result = new HashMap<>();
         try {
             if (id != null && !id.trim().isEmpty()) {
                 log.info("Deleting goods by ID: {}", id);
                 goodsEmbeddingStore.removeAll(Collections.singletonList(id));
-                result.put("message", "Deleted by ID: " + id);
+                return JsonResult.ok("Deleted by ID: " + id);
             } else {
                 log.info("Deleting goods by SKU: {}", sku);
                 Filter filter = metadataKey("sku").isEqualTo(sku);
                 goodsEmbeddingStore.removeAll(filter);
-                result.put("message", "Deleted by SKU: " + sku);
+                return JsonResult.ok("Deleted by SKU: " + sku);
             }
             
-            result.put("success", true);
         } catch (Exception e) {
             log.error("Failed to delete goods. SKU: {}, ID: {}", sku, id, e);
-            result.put("success", false);
-            result.put("message", "Failed to delete: " + e.getMessage());
+            return JsonResult.fail("Failed to delete: " + e.getMessage());
         }
-        return result;
     }
 }

@@ -17,7 +17,9 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.suym.ai.kbs.dto.base.JsonResult;
 import org.suym.ai.kbs.model.embedding.ClipEmbeddingModel;
+import org.suym.ai.kbs.vo.ImageSearchVO;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -56,14 +58,14 @@ public class ImageController {
      */
     @Operation(summary = "上传图片 (以图搜图)", description = "上传图片，计算 CLIP 向量并存入图库")
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public String uploadImage(
+    public JsonResult<String> uploadImage(
             @Parameter(description = "需要上传的图片文件", required = true)
             @RequestParam("file") MultipartFile file,
             @Parameter(description = "图片描述（可选，用于元数据）")
             @RequestParam(value = "description", required = false, defaultValue = "") String description
     ) throws IOException {
         if (file.isEmpty()) {
-            return "File is empty";
+            return JsonResult.fail("File is empty");
         }
 
         // 1. 保存图片到本地临时目录 (CLIP 模型需要读取实际文件)
@@ -91,7 +93,7 @@ public class ImageController {
         TextSegment segment = TextSegment.from(tempFilePath.toString(), Metadata.from("description", description));
         imageEmbeddingStore.add(imageEmbedding, segment);
 
-        return "Image uploaded successfully. ID: " + uniqueFilename;
+        return JsonResult.ok("Image uploaded successfully. ID: " + uniqueFilename);
     }
 
     /**
@@ -101,7 +103,7 @@ public class ImageController {
      */
     @Operation(summary = "以图搜图", description = "上传一张图片，在图库中搜索最相似的图片")
     @PostMapping(value = "/search", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public List<Map<String, Object>> searchImage(
+    public JsonResult<List<ImageSearchVO>> searchImage(
             @Parameter(description = "用于搜索的图片", required = true)
             @RequestParam("file") MultipartFile file
     ) throws IOException {
@@ -140,14 +142,16 @@ public class ImageController {
             log.info("Search finished. Found {} matches.", result.matches().size());
 
             // 4. 返回结果
-            return result.matches().stream()
-                    .map(match -> Map.<String, Object>of(
-                            "score", match.score(),
-                            "image_path", match.embedded().text(), 
-                            "description", match.embedded().metadata().getString("description") != null ? 
-                                           match.embedded().metadata().getString("description") : ""
-                    ))
+            List<ImageSearchVO> resultList = result.matches().stream()
+                    .map(match -> ImageSearchVO.builder()
+                            .score(match.score())
+                            .imagePath(match.embedded().text())
+                            .description(match.embedded().metadata().getString("description") != null ? 
+                                           match.embedded().metadata().getString("description") : "")
+                            .build())
                     .collect(Collectors.toList());
+            
+            return JsonResult.ok(resultList);
         } finally {
             // 5. 清理临时文件
             try {
@@ -166,7 +170,7 @@ public class ImageController {
      */
     @Operation(summary = "以文搜图", description = "输入文字描述（如'一只猫'），搜索最相似的图片")
     @GetMapping("/search-by-text")
-    public List<Map<String, Object>> searchImageByText(
+    public JsonResult<List<ImageSearchVO>> searchImageByText(
             @Parameter(description = "搜索关键词", required = true)
             @RequestParam("query") String query
     ) {
@@ -194,13 +198,15 @@ public class ImageController {
         EmbeddingSearchResult<TextSegment> result = imageEmbeddingStore.search(searchRequest);
         log.info("Search finished. Found {} matches.", result.matches().size());
 
-        return result.matches().stream()
-                .map(match -> Map.<String, Object>of(
-                        "score", match.score(),
-                        "image_path", match.embedded().text(),
-                        "description", match.embedded().metadata().getString("description") != null ? 
-                                       match.embedded().metadata().getString("description") : ""
-                ))
+        List<ImageSearchVO> resultList = result.matches().stream()
+                .map(match -> ImageSearchVO.builder()
+                        .score(match.score())
+                        .imagePath(match.embedded().text())
+                        .description(match.embedded().metadata().getString("description") != null ? 
+                                       match.embedded().metadata().getString("description") : "")
+                        .build())
                 .collect(Collectors.toList());
+
+        return JsonResult.ok(resultList);
     }
 }
