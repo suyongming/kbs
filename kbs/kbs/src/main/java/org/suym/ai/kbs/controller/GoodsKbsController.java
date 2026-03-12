@@ -1,22 +1,18 @@
 package org.suym.ai.kbs.controller;
 
-import dev.langchain4j.data.document.Metadata;
-import dev.langchain4j.data.embedding.Embedding;
-import dev.langchain4j.data.image.Image;
-import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.store.embedding.EmbeddingMatch;
-import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
-import dev.langchain4j.store.embedding.EmbeddingSearchResult;
-import dev.langchain4j.store.embedding.EmbeddingStore;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import net.minidev.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.suym.ai.kbs.dto.GoodsSaveDTO;
@@ -34,12 +30,8 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import dev.langchain4j.store.embedding.filter.Filter;
-
-import static dev.langchain4j.store.embedding.filter.MetadataFilterBuilder.metadataKey;
-
 /**
- * 商品知识库业务 Controller
+ * 商品知识库业务 Controller (Spring AI + PGVector 版)
  * 负责商品数据的训练 (Ingestion) 和 自然语言查询 (Retrieval)
  */
 @RestController
@@ -49,13 +41,19 @@ public class GoodsKbsController {
 
     private static final Logger log = LoggerFactory.getLogger(GoodsKbsController.class);
 
-    private final EmbeddingStore<TextSegment> goodsEmbeddingStore;
+    private final VectorStore vectorStore;
     private final ClipEmbeddingModel clipEmbeddingModel;
+    private final JdbcClient jdbcClient;
+    private final ObjectMapper objectMapper;
 
-    public GoodsKbsController(@Qualifier("goodsEmbeddingStore") EmbeddingStore<TextSegment> goodsEmbeddingStore,
-                              @Autowired(required = false) ClipEmbeddingModel clipEmbeddingModel) {
-        this.goodsEmbeddingStore = goodsEmbeddingStore;
+    public GoodsKbsController(VectorStore vectorStore,
+                              ClipEmbeddingModel clipEmbeddingModel,
+                              JdbcClient jdbcClient,
+                              ObjectMapper objectMapper) {
+        this.vectorStore = vectorStore;
         this.clipEmbeddingModel = clipEmbeddingModel;
+        this.jdbcClient = jdbcClient;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -70,11 +68,17 @@ public class GoodsKbsController {
             @Parameter(description = "返回结果数量", required = false)
             @RequestParam(value = "limit", defaultValue = "5") int limit
     ) throws IOException {
-        if (clipEmbeddingModel == null) {
-            throw new IllegalStateException("CLIP model is not initialized.");
-        }
         if (file.isEmpty()) {
-            throw new IllegalArgumentException("File is empty");
+            throw new IllegalArgumentException("File cannot be empty");
+        }
+        
+        String contentType = file.getContentType();
+        if (contentType == null || !contentType.startsWith("image/")) {
+            throw new IllegalArgumentException("Invalid file type. Only images are allowed.");
+        }
+
+        if (limit <= 0 || limit > 100) {
+            throw new IllegalArgumentException("Limit must be between 1 and 100");
         }
 
         // 1. 保存查询图片到临时文件
@@ -88,29 +92,32 @@ public class GoodsKbsController {
             file.transferTo(tempFilePath.toFile());
             log.info("Temporary search image saved to: {}", tempFilePath);
 
-            // 2. 计算查询图片的向量
-            Image queryImage = Image.builder().url(tempFilePath.toUri().toString()).build();
-            log.info("Calculating CLIP embedding for image...");
-            Embedding queryEmbedding = clipEmbeddingModel.embed(queryImage).content();
+            // 2. 直接使用图片路径作为查询内容
+            // ClipEmbeddingModel 会自动检测路径并加载图片计算向量
+            // 注意：这里我们不能直接用 vectorStore.similaritySearch(String)，因为它默认是 EmbedText
+            // 但我们的 ClipEmbeddingModel 已经改造成支持自动识别 Image Path
+            // 所以直接传路径即可！
+            List<Document> results = vectorStore.similaritySearch(
+                    SearchRequest.query(tempFilePath.toString()).withTopK(limit)
+            );
 
-            // 3. 在商品库中检索
-            log.info("Searching in Milvus goods store...");
-            EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
-                    .queryEmbedding(queryEmbedding)
-                    .maxResults(limit)
-                    .minScore(0.0)
-                    .build();
+            // 3. 格式化返回结果
+            List<GoodsSearchVO> resultList = results.stream()
+                    .map(doc -> {
+                        Double distance = 0.0;
+                        Object distObj = doc.getMetadata().get("distance");
+                        if (distObj instanceof Float) {
+                            distance = ((Float) distObj).doubleValue();
+                        } else if (distObj instanceof Double) {
+                            distance = (Double) distObj;
+                        }
 
-            EmbeddingSearchResult<TextSegment> result = goodsEmbeddingStore.search(searchRequest);
-            log.info("Search finished. Found {} matches.", result.matches().size());
-
-            // 4. 格式化返回结果
-            List<GoodsSearchVO> resultList = result.matches().stream()
-                    .map(match -> GoodsSearchVO.builder()
-                            .score(match.score())
-                            .text(match.embedded().text())
-                            .metadata(new HashMap<>(match.embedded().metadata().asMap()))
-                            .build())
+                        return GoodsSearchVO.builder()
+                                .score(1.0 - distance) // PGVector 默认返回距离，需要转换 (1-distance 粗略近似 score)
+                                .text(doc.getContent())
+                                .metadata(doc.getMetadata())
+                                .build();
+                    })
                     .collect(Collectors.toList());
 
             return JsonResult.ok(resultList);
@@ -125,8 +132,10 @@ public class GoodsKbsController {
             }
         }
     }
+
     /**
      * 4. 查询所有商品 (分页)
+     * 使用 JdbcClient 直接查询 PGVector 表，不再进行向量计算
      */
     @Operation(summary = "查询商品列表", description = "分页查询所有商品")
     @GetMapping("/list")
@@ -136,43 +145,40 @@ public class GoodsKbsController {
             @Parameter(description = "每页数量", example = "10")
             @RequestParam(value = "size", defaultValue = "10") int size
     ) {
-        // 创建一个全0的虚拟向量，用于匹配所有数据
-        // 注意：必须与 goodsEmbeddingStore 的维度 (512) 一致
-        float[] dummyVector = new float[512];
-        Embedding dummyEmbedding = Embedding.from(dummyVector);
+        int offset = (page - 1) * size;
+        
+        // 查询总数
+        Long total = jdbcClient.sql("SELECT count(*) FROM vector_store")
+                .query(Long.class)
+                .single();
 
-        // Milvus 的 search 不支持标准的 skip/limit 分页，通常只能通过 topK 实现
-        // 这里模拟分页：获取前 (page * size) 条，然后手动截取
-        int topK = page * size;
-
-        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
-                .queryEmbedding(dummyEmbedding)
-                .maxResults(topK)
-                .minScore(0.0)
-                .build();
-
-        EmbeddingSearchResult<TextSegment> result = goodsEmbeddingStore.search(searchRequest);
-        List<EmbeddingMatch<TextSegment>> allMatches = result.matches();
-
-        // 手动分页截取
-        int start = (page - 1) * size;
-        List<GoodsSearchVO> records = new ArrayList<>();
-
-        if (start < allMatches.size()) {
-            int end = Math.min(start + size, allMatches.size());
-            List<EmbeddingMatch<TextSegment>> pageMatches = allMatches.subList(start, end);
-
-            records = pageMatches.stream()
-                    .map(match -> GoodsSearchVO.builder()
-                            .score(match.score())
-                            .text(match.embedded().text())
-                            .metadata(new HashMap<>(match.embedded().metadata().asMap()))
-                            .build())
-                    .collect(Collectors.toList());
-        }
+        // 分页查询 (仅查询内容和元数据，不查向量)
+        List<GoodsSearchVO> records = jdbcClient.sql("SELECT content, metadata FROM vector_store LIMIT :limit OFFSET :offset")
+                .param("limit", size)
+                .param("offset", offset)
+                .query((rs, rowNum) -> {
+                    String content = rs.getString("content");
+                    String metadataJson = rs.getString("metadata");
+                    
+                    Map<String, Object> metadata = new HashMap<>();
+                    if (metadataJson != null && !metadataJson.isEmpty()) {
+                        try {
+                            metadata = objectMapper.readValue(metadataJson, new TypeReference<Map<String, Object>>() {});
+                        } catch (Exception e) {
+                            log.error("Failed to parse metadata JSON", e);
+                            // Fallback to empty map or handle error
+                        }
+                    }
+                    
+                    return GoodsSearchVO.builder()
+                            .text(content)
+                            .metadata(metadata)
+                            .build();
+                })
+                .list();
 
         PageVO<GoodsSearchVO> pageVO = PageVO.<GoodsSearchVO>builder()
-                .total(allMatches.size())
+                .total(total)
                 .page(page)
                 .size(size)
                 .records(records)
@@ -183,9 +189,8 @@ public class GoodsKbsController {
 
     /**
      * 5. 编辑商品
-     * 更新商品信息 (Upsert)
      */
-    @Operation(summary = "编辑商品", description = "更新商品信息 (先删除旧的，再插入新的)")
+    @Operation(summary = "编辑商品", description = "更新商品信息")
     @PutMapping("/update")
     public JsonResult<String> updateGoods(
             @RequestBody GoodsUpdateDTO dto
@@ -194,120 +199,81 @@ public class GoodsKbsController {
             throw new IllegalArgumentException("SKU is required");
         }
 
-        log.info("Updating goods: {}", dto.getSku());
+        // 1. 删除旧数据 (PGVector 中通常没有直接根据 metadata 删除的 API，需要用 ID)
+        // Spring AI 的 delete 只能根据 ID 删除
+        // 这是一个痛点。我们可以用 JdbcClient 根据 metadata 删除
+        String deleteSql = "DELETE FROM vector_store WHERE metadata->>'sku' = ?";
+        int deleted = jdbcClient.sql(deleteSql)
+                .param(dto.getSku())
+                .update();
+        log.info("Deleted {} old records for SKU: {}", deleted, dto.getSku());
 
-        try {
-            // 1. 删除旧数据
-            Filter filter = metadataKey("sku").isEqualTo(dto.getSku());
-            goodsEmbeddingStore.removeAll(filter);
-
-            // 2. 准备新数据
-            // 如果提供了图片 URL，则重新计算向量；否则需要处理 (目前简化为必须提供图片或使用默认向量)
-            // 更好的做法是先查出旧数据，拿到旧向量，但这需要 EmbeddingStore 支持 getById
-            // 这里简化逻辑：要求更新时必须提供完整信息，包括图片 URL
-
-            if (dto.getImagePath() == null || dto.getImagePath().isEmpty()) {
-                throw new IllegalArgumentException("Image path is required for update (to re-calculate vector)");
-            }
-
-            Image image = Image.builder().url(dto.getImagePath()).build();
-            Embedding imageEmbedding = clipEmbeddingModel.embed(image).content();
-
-            Metadata metadata = new Metadata();
-            metadata.add("sku", dto.getSku());
-            if (dto.getName() != null) metadata.add("name", dto.getName());
-            if (dto.getPrice() != null) metadata.add("price", String.valueOf(dto.getPrice()));
-            if (dto.getStatus() != null) metadata.add("status", String.valueOf(dto.getStatus()));
-            if (dto.getImagePath() != null) metadata.add("image_path", dto.getImagePath());
-            if (dto.getDescription() != null) metadata.add("description", dto.getDescription());
-
-            String textContent = dto.getDescription() != null ? dto.getDescription() : (dto.getName() + " " + dto.getSku());
-            TextSegment segment = TextSegment.from(textContent, metadata);
-
-            // 3. 插入新数据
-            goodsEmbeddingStore.add(imageEmbedding, segment);
-
-            return JsonResult.ok("Goods updated successfully: " + dto.getSku());
-
-        } catch (Exception e) {
-            log.error("Failed to update goods: {}", dto.getSku(), e);
-            return JsonResult.fail("Failed to update: " + e.getMessage());
+        // 2. 插入新数据
+        if (dto.getImagePath() == null || dto.getImagePath().isEmpty()) {
+            throw new IllegalArgumentException("Image path is required");
         }
+
+        Map<String, Object> metadata = new HashMap<>();
+        metadata.put("sku", dto.getSku());
+        if (dto.getName() != null) metadata.put("name", dto.getName());
+        if (dto.getPrice() != null) metadata.put("price", dto.getPrice());
+        metadata.put("image_path", dto.getImagePath());
+        if (dto.getDescription() != null) metadata.put("description", dto.getDescription());
+
+        Document doc = new Document(dto.getImagePath(), metadata);
+        vectorStore.add(List.of(doc));
+
+        return JsonResult.ok("Goods updated successfully");
     }
 
-
-
-
     /**
-     * 1. 商品数据训练接口 (重写版)
-     * 接收 JSON 数组，包含商品信息
+     * 1. 商品数据训练接口
      */
-    @Operation(summary = "训练商品数据", description = "批量上传商品信息 (JSON 数组)，系统将图片向量化并存入知识库")
+    @Operation(summary = "训练商品数据", description = "批量上传商品信息")
     @PostMapping(value = "/train")
     public JsonResult<TrainResultVO> trainGoodsData(
             @RequestBody List<GoodsSaveDTO> goodsList
     ) {
-        if (clipEmbeddingModel == null) {
-            throw new IllegalStateException("CLIP model is not initialized. Cannot process images.");
-        }
-        if (goodsList == null || goodsList.isEmpty()) {
-            throw new IllegalArgumentException("Goods list is empty");
-        }
-
         List<String> successSkus = new ArrayList<>();
         List<String> failedLines = new ArrayList<>();
         int totalProcessed = 0;
 
+        List<Document> documentsBatch = new ArrayList<>();
+
         for (GoodsSaveDTO goods : goodsList) {
             totalProcessed++;
             String sku = goods.getSku();
-            if (sku == null) sku = "UNKNOWN";
-
             try {
                 String imagePath = goods.getImagePath();
-                
-                // 处理可能存在的格式问题（如用户输入包含反引号或空格）
-                if (imagePath != null) {
-                    imagePath = imagePath.trim().replace("`", "");
-                }
+                if (imagePath != null) imagePath = imagePath.trim().replace("`", "");
 
                 if (imagePath == null || imagePath.isEmpty()) {
-                    log.warn("Item {}: Missing image_path, skipping.", totalProcessed);
-                    failedLines.add("Item " + totalProcessed + " (SKU: " + sku + "): Missing image_path");
                     continue;
                 }
 
-                // 1. 加载图片并计算向量
-                log.info("Processing SKU: {}, Image: {}", sku, imagePath);
-                Image image = Image.builder().url(imagePath).build();
+                Map<String, Object> metadata = new HashMap<>();
+                metadata.put("sku", sku);
+                metadata.put("name", goods.getName());
+                metadata.put("price", goods.getPrice());
+                metadata.put("image_path", imagePath);
+                metadata.put("description", goods.getDescription());
 
-                // 这里的 embed 方法内部现在非常健壮，如果失败会抛出 RuntimeException
-                Embedding imageEmbedding = clipEmbeddingModel.embed(image).content();
-
-                // 2. 构建元数据
-                Metadata metadata = new Metadata();
-                metadata.add("sku", sku);
-                if (goods.getId() != null) metadata.add("id", goods.getId()); // 注意：这里的 id 是业务 ID，不是向量库的主键 ID
-                if (goods.getName() != null) metadata.add("name", goods.getName());
-                if (goods.getPrice() != null) metadata.add("price", String.valueOf(goods.getPrice()));
-                if (goods.getStatus() != null) metadata.add("status", String.valueOf(goods.getStatus()));
-                metadata.add("image_path", imagePath);
-                if (goods.getDescription() != null) metadata.add("description", goods.getDescription());
-
-                // 3. 构建文本段 (用于混合检索或调试)
-                String textContent = goods.getDescription() != null ? goods.getDescription() : (goods.getName() + " " + sku);
-                TextSegment segment = TextSegment.from(textContent, metadata);
-
-                // 4. 存入 Milvus
-                goodsEmbeddingStore.add(imageEmbedding, segment);
-
+                // 创建 Document，内容是图片路径
+                // ClipEmbeddingModel 会识别这个路径并计算 Image Embedding
+                Document doc = new Document(imagePath, metadata);
+                documentsBatch.add(doc);
                 successSkus.add(sku);
-                log.info("Successfully ingested SKU: {}", sku);
 
             } catch (Exception e) {
-                log.error("Failed to process item {} (SKU: {}): {}", totalProcessed, sku, e.getMessage());
-                failedLines.add("Item " + totalProcessed + " (SKU: " + sku + "): " + e.getMessage());
+                log.error("Error preparing SKU: {}", sku, e);
+                failedLines.add("SKU " + sku + ": " + e.getMessage());
             }
+        }
+
+        // 批量存入 PGVector
+        if (!documentsBatch.isEmpty()) {
+            vectorStore.add(documentsBatch);
+            log.info("Batch inserted {} documents", documentsBatch.size());
         }
 
         TrainResultVO resultVO = TrainResultVO.builder()
@@ -323,44 +289,35 @@ public class GoodsKbsController {
 
     /**
      * 2. 用户自然语言查询接口
-     * 输入文字描述，通过 CLIP 文本编码器生成向量，在商品库中检索
      */
-    @Operation(summary = "自然语言搜商品", description = "输入文字描述（如'红色连衣裙'），搜索最匹配的商品")
+    @Operation(summary = "自然语言搜商品", description = "输入文字描述")
     @GetMapping("/search")
     public JsonResult<List<GoodsSearchVO>> searchGoods(
-            @Parameter(description = "搜索关键词", required = true)
             @RequestParam("query") String query,
-            @Parameter(description = "返回结果数量", required = false)
             @RequestParam(value = "limit", defaultValue = "5") int limit
     ) {
-        if (clipEmbeddingModel == null) {
-            throw new IllegalStateException("CLIP model is not initialized.");
-        }
-        if (query == null || query.trim().isEmpty()) {
-            throw new IllegalArgumentException("Query cannot be empty");
-        }
+        // 直接查询
+        // ClipEmbeddingModel 会识别这是文本，计算 Text Embedding
+        List<Document> results = vectorStore.similaritySearch(
+                SearchRequest.query(query).withTopK(limit)
+        );
 
-        log.info("Searching goods by query: {}", query);
-
-        // 1. 计算文本的 CLIP 向量
-        Embedding queryEmbedding = clipEmbeddingModel.embed(query).content();
-
-        // 2. 在商品库中检索
-        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
-                .queryEmbedding(queryEmbedding)
-                .maxResults(limit)
-                .minScore(0.0) // 阈值可调
-                .build();
-
-        EmbeddingSearchResult<TextSegment> result = goodsEmbeddingStore.search(searchRequest);
-
-        // 3. 格式化返回结果
-        List<GoodsSearchVO> resultList = result.matches().stream()
-                .map(match -> GoodsSearchVO.builder()
-                        .score(match.score())
-                        .text(match.embedded().text())
-                        .metadata(new HashMap<>(match.embedded().metadata().asMap()))
-                        .build())
+        List<GoodsSearchVO> resultList = results.stream()
+                .map(doc -> {
+                    Double distance = 0.0;
+                    Object distObj = doc.getMetadata().get("distance");
+                    if (distObj instanceof Float) {
+                        distance = ((Float) distObj).doubleValue();
+                    } else if (distObj instanceof Double) {
+                        distance = (Double) distObj;
+                    }
+                    
+                    return GoodsSearchVO.builder()
+                            .score(1.0 - distance)
+                            .text(doc.getContent())
+                            .metadata(doc.getMetadata())
+                            .build();
+                })
                 .collect(Collectors.toList());
 
         return JsonResult.ok(resultList);
@@ -368,35 +325,22 @@ public class GoodsKbsController {
 
     /**
      * 3. 删除商品接口
-     * 支持根据 SKU 或 ID 删除
      */
-    @Operation(summary = "删除商品", description = "删除商品向量。请提供 sku 或 id 其中之一。")
+    @Operation(summary = "删除商品", description = "删除商品向量")
     @DeleteMapping("/delete")
     public JsonResult<String> deleteGoods(
-            @Parameter(description = "商品 SKU (Metadata)") 
             @RequestParam(required = false) String sku,
-            @Parameter(description = "向量 ID (Primary Key)") 
             @RequestParam(required = false) String id
     ) {
-        if ((sku == null || sku.trim().isEmpty()) && (id == null || id.trim().isEmpty())) {
-            throw new IllegalArgumentException("Either 'sku' or 'id' must be provided");
+        if (id != null && !id.isEmpty()) {
+            vectorStore.delete(List.of(id));
+            return JsonResult.ok("Deleted by ID: " + id);
+        } else if (sku != null && !sku.isEmpty()) {
+            // PGVector 根据 metadata 删除
+            String deleteSql = "DELETE FROM vector_store WHERE metadata->>'sku' = ?";
+            int deleted = jdbcClient.sql(deleteSql).param(sku).update();
+            return JsonResult.ok("Deleted by SKU: " + sku + ", count: " + deleted);
         }
-
-        try {
-            if (id != null && !id.trim().isEmpty()) {
-                log.info("Deleting goods by ID: {}", id);
-                goodsEmbeddingStore.removeAll(Collections.singletonList(id));
-                return JsonResult.ok("Deleted by ID: " + id);
-            } else {
-                log.info("Deleting goods by SKU: {}", sku);
-                Filter filter = metadataKey("sku").isEqualTo(sku);
-                goodsEmbeddingStore.removeAll(filter);
-                return JsonResult.ok("Deleted by SKU: " + sku);
-            }
-            
-        } catch (Exception e) {
-            log.error("Failed to delete goods. SKU: {}, ID: {}", sku, id, e);
-            return JsonResult.fail("Failed to delete: " + e.getMessage());
-        }
+        return JsonResult.fail("Provide sku or id");
     }
 }

@@ -1,18 +1,5 @@
 package org.suym.ai.kbs.controller;
 
-import dev.langchain4j.data.document.Document;
-import dev.langchain4j.data.document.DocumentSplitter;
-import dev.langchain4j.data.document.Metadata;
-import dev.langchain4j.data.document.splitter.DocumentSplitters;
-import dev.langchain4j.data.embedding.Embedding;
-import dev.langchain4j.data.message.AiMessage;
-import dev.langchain4j.data.message.UserMessage;
-import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.chat.ChatLanguageModel;
-import dev.langchain4j.model.embedding.EmbeddingModel;
-import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
-import dev.langchain4j.store.embedding.EmbeddingSearchResult;
-import dev.langchain4j.store.embedding.EmbeddingStore;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
@@ -21,7 +8,14 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.chat.prompt.SystemPromptTemplate;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.transformer.splitter.TokenTextSplitter;
+import org.springframework.ai.vectorstore.SearchRequest;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -36,7 +30,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * 知识库业务 Controller
+ * 知识库业务 Controller (Spring AI 版)
  * 包含文档上传 (Ingestion) 和 智能问答 (Retrieval) 接口
  */
 @RestController
@@ -46,24 +40,19 @@ public class KbsController {
 
     private static final Logger log = LoggerFactory.getLogger(KbsController.class);
 
-    private final EmbeddingStore<TextSegment> embeddingStore;
-    private final EmbeddingModel embeddingModel;
-    private final ChatLanguageModel chatLanguageModel;
+    private final VectorStore vectorStore;
+    private final ChatClient chatClient;
 
-    public KbsController(@Qualifier("milvusEmbeddingStore") EmbeddingStore<TextSegment> embeddingStore, 
-                         EmbeddingModel embeddingModel,
-                         ChatLanguageModel chatLanguageModel) {
-        this.embeddingStore = embeddingStore;
-        this.embeddingModel = embeddingModel;
-        this.chatLanguageModel = chatLanguageModel;
+    public KbsController(VectorStore vectorStore, ChatClient.Builder chatClientBuilder) {
+        this.vectorStore = vectorStore;
+        this.chatClient = chatClientBuilder.build();
     }
 
     /**
      * 1. 知识库管理 (RAG - Ingestion)
      * API: POST /api/documents/upload
-     * 逻辑: 接收文件 -> 解析 -> 切分 -> 向量化 -> 持久化
      */
-    @Operation(summary = "上传文档", description = "上传文本文件 (.txt)，系统自动进行分段、向量化并存入 Milvus 知识库")
+    @Operation(summary = "上传文档", description = "上传文本文件 (.txt)，系统自动进行分段、向量化并存入知识库")
     @PostMapping(value = "/documents/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public JsonResult<String> uploadDocument(
             @Parameter(description = "需要上传的文本文件", required = true) 
@@ -73,20 +62,29 @@ public class KbsController {
             return JsonResult.fail("File is empty");
         }
 
-        // 1. 读取文件内容 (MVP 仅支持文本文件)
+        // 1. 读取文件内容
         String content = new String(file.getBytes(), StandardCharsets.UTF_8);
+        
+        // 【优化】手动追加一个换行符，防止最后一行因为切分器边界问题被丢弃
+        if (!content.endsWith("\n")) {
+            content += "\n";
+        }
+        
         String filename = file.getOriginalFilename();
 
-        // 2. 创建 Document 对象并添加元数据
-        Document document = Document.from(content, Metadata.from("filename", filename));
+        // 2. 创建 Document
+        Document document = new Document(content, Map.of("filename", filename));
 
         // 3. 文档切分 (Chunking)
-        DocumentSplitter splitter = DocumentSplitters.recursive(500, 0);
-        List<TextSegment> segments = splitter.split(document);
+        // 使用更适合中文的切分策略，例如 TokenTextSplitter 并调整参数
+        // 这里的 1000 是 chunk size, 400 是 overlap
+        // TokenTextSplitter 可能会吃掉最后的一点内容，如果它不足以构成一个 token
+        // 这里改用 SimpleTextSplitter 可能会更稳妥，或者调整 minChunkSize
+        TokenTextSplitter splitter = new TokenTextSplitter(1000, 400, 5, 10000, true);
+        List<Document> segments = splitter.apply(List.of(document));
 
-        // 4. 向量化 (Embedding) 并 5. 持久化 (Store)
-        List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
-        embeddingStore.addAll(embeddings, segments);
+        // 4. 向量化并持久化 (Store)
+        vectorStore.add(segments);
 
         return JsonResult.ok("Successfully uploaded " + filename + ". Created " + segments.size() + " segments.");
     }
@@ -94,7 +92,6 @@ public class KbsController {
     /**
      * 2. 智能问答 (RAG - Retrieval)
      * API: POST /api/chat
-     * 逻辑: 问题向量化 -> 语义检索 -> 构建 Prompt -> 调用 LLM -> 返回结果
      */
     @Operation(summary = "智能问答", description = "基于已上传的知识库文档回答用户问题")
     @ApiResponse(responseCode = "200", description = "成功返回回答", 
@@ -113,51 +110,40 @@ public class KbsController {
 
         log.info("Question received: {}", question);
 
-        // 1. 将用户问题向量化
-        log.info("Starting embedding...");
-        Embedding questionEmbedding = embeddingModel.embed(question).content();
-        log.info("Embedding finished.");
+        // 1. 语义检索 (Semantic Search)
+        log.info("Starting Vector Store search...");
+        List<Document> relevantSegments = vectorStore.similaritySearch(
+                SearchRequest.query(question).withTopK(5) // 增加检索数量，确保包含足够上下文
+        );
+        log.debug("Search finished. Found {} segments.", relevantSegments.size());
 
-        // 2. 语义检索 (Semantic Search)
-        log.info("Starting Milvus search...");
-        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
-                .queryEmbedding(questionEmbedding)
-                .maxResults(3)
-                .minScore(0.0)
-                .build();
-        
-        EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
-        List<TextSegment> relevantSegments = searchResult.matches().stream()
-                .map(match -> match.embedded())
-                .collect(Collectors.toList());
-        log.debug("Milvus search finished. Found {} segments.", relevantSegments.size());
-
-        // 3. 构建 Prompt
+        // 2. 构建 Context
         String context = relevantSegments.stream()
-                .map(TextSegment::text)
+                .map(Document::getContent)
                 .collect(Collectors.joining("\n\n"));
 
-        // 可能会有幻觉
-        String prompt = "基于以下上下文回答问题:\n\n" +
-                "上下文:\n" + context + "\n\n" +
-                "问题: " + question;
+        // 3. 构建 Prompt 并调用 LLM
+        String systemText = "你是一个智能助手。请基于以下上下文回答用户的问题。如果上下文中没有答案，请诚实地说不知道。";
+        String userText = "上下文:\n" + context + "\n\n" + "问题: " + question;
 
-        log.info("Prompt built. Length: {}", prompt.length());
-
-        // 4. 生成回答 (Generation)
         log.info("Calling LLM...");
         try {
-            AiMessage answer = chatLanguageModel.generate(UserMessage.from(prompt)).content();
+            String answer = chatClient.prompt()
+                    .system(systemText)
+                    .user(userText)
+                    .call()
+                    .content();
+            
             log.info("LLM returned answer.");
 
-            // 5. 返回结果
+            // 4. 返回结果
             List<String> sourceDocs = relevantSegments.stream()
-                    .map(segment -> segment.metadata().getString("filename"))
+                    .map(doc -> (String) doc.getMetadata().get("filename"))
                     .distinct()
                     .collect(Collectors.toList());
 
             ChatResultVO resultVO = ChatResultVO.builder()
-                    .answer(answer.text())
+                    .answer(answer)
                     .sourceDocs(sourceDocs)
                     .build();
 
@@ -170,8 +156,6 @@ public class KbsController {
 
     /**
      * 6. 根据 ID 删除数据
-     * API: DELETE /api/documents/{id}
-     * 逻辑: 直接调用 EmbeddingStore 的 removeAll 方法删除指定 ID 的记录
      */
     @Operation(summary = "删除文档/数据", description = "根据 ID 删除知识库中的数据")
     @DeleteMapping("/documents/{id}")
@@ -185,12 +169,11 @@ public class KbsController {
 
         log.info("Deleting document with ID: {}", id);
 
-        // 尝试从文本知识库中删除
         try {
-            embeddingStore.removeAll(Collections.singletonList(id));
-            log.info("Deleted from text embedding store: {}", id);
+            vectorStore.delete(Collections.singletonList(id));
+            log.info("Deleted from vector store: {}", id);
         } catch (Exception e) {
-            log.warn("Failed to delete from text embedding store: {}", e.getMessage());
+            log.warn("Failed to delete from vector store: {}", e.getMessage());
             return JsonResult.fail("Failed to delete: " + e.getMessage());
         }
 

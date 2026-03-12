@@ -1,38 +1,46 @@
 logging:
   level:
     org.suym.ai.kbs: DEBUG
-    dev.langchain4j: DEBUG
+    org.springframework.ai: DEBUG
 
 spring:
   evn: dev
   application:
     name: kbs
+  
+  # 数据库配置 (PGVector)
+  datasource:
+    url: jdbc:postgresql://localhost:5432/kbs_db
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+
+  # Spring AI 配置
+  ai:
+    # OpenAI (阿里云百炼兼容模式)
+    openai:
+      base-url: https://dashscope.aliyuncs.com/compatible-mode
+      api-key: sk-be4abd8c25ad40c5b495b29795ac2144
+      chat:
+        options:
+          model: qwen-plus
+    
+    # PGVector 向量库配置
+    vectorstore:
+      pgvector:
+        # 自动初始化表结构
+        initialize-schema: true
+        # 向量维度 (CLIP 是 512)
+        dimensions: 512
+        # 索引类型
+        index-type: HNSW
+        # 距离度量
+        distance-type: COSINE_DISTANCE
+
 server:
   port: 10483
 
-milvus:
-  host: localhost
-  port: 19530
-  # 默认
-  default:
-    collection-name: enterprise_knowledge_v2
-    dimension: 384
-  # 商品
-  goods:
-    collection-name: goods_store_v1
-    dimension: 512
-  # 画廊
-  gallery:
-    collection-name: image_gallery_v1
-    dimension: 512
-
-llm:
-  openai:
-    base-url: https://dashscope.aliyuncs.com/compatible-mode/v1 # 阿里云百炼兼容模式 endpoint
-    api-key: sk-be4abd8c25ad40c5b495b29795ac2144
-    model-name: qwen-plus
-
-
+# 自定义 CLIP 模型配置 (保持不变)
 clip:
   model:
     text-path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/text_model.onnx"

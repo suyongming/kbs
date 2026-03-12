@@ -1,40 +1,44 @@
 logging:
   level:
     org.suym.ai.kbs: DEBUG
-    dev.langchain4j: DEBUG
+    org.springframework.ai: DEBUG
 
 spring:
   evn: local
   application:
     name: kbs
+  
+  # 数据库配置 (PGVector - Local)
+  datasource:
+    url: jdbc:postgresql://localhost:5432/kbs_db
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+
+  # Spring AI 配置
+  ai:
+    # OpenAI (Local Ollama)
+    openai:
+      base-url: http://localhost:11434
+      api-key: ollama
+      chat:
+        options:
+          model: deepseek-r1:8b
+    
+    # PGVector 向量库配置
+    vectorstore:
+      pgvector:
+        initialize-schema: true
+        dimensions: 512
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
 
 server:
   port: 10483
 
-
-milvus:
-  host: localhost
-  port: 19530
-  default:
-    collection-name: enterprise_knowledge_v2
-    dimension: 384
-  goods:
-    collection-name: goods_store_v1
-    dimension: 512
-
-llm:
-  # 本地部署参考 攻略.md  ,  本地部署ollama
-  openai:
-    # ollama 兼容 OpenAI 格式的 API 地址
-    base-url: http://localhost:11434/v1
-    # ollama 不需要 Key，随便填一个
-    api-key: ollama
-    # 必须与 ollama pull 的模型名字一致
-    model-name: deepseek-r1:8b
-
+# 自定义 CLIP 模型配置 (保持不变，注意 key 名称微调以匹配 Configuration)
 clip:
-  text_model:
-    path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/text_model.onnx"
-    tokenizer_path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/tokenizer.json"
-  vision_model:
-    path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/vision_model.onnx"
+  model:
+    text-path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/text_model.onnx"
+    tokenizer-path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/tokenizer.json"
+    vision-path: "C:/Users/18699/Desktop/AI/计算机视觉/clip模型/vision_model.onnx"
